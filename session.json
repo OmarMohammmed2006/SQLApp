@@ -1,0 +1,9 @@
+{
+  "server": ".\\MSSQLSERVER01",
+  "db": "ElectronicsRetailer",
+  "auth": "windows",
+  "user": "sa",
+  "password": "",
+  "save_pass": false,
+  "auto_connect": true
+}
