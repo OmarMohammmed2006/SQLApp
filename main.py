@@ -97,6 +97,7 @@ class App(ctk.CTk):
         self._build_browser_page()
         self._build_query_page()
         self._build_viz_page()
+        self._build_joins_page()
         self._show("connection")
 
         # Auto-connect after UI is ready
@@ -126,10 +127,11 @@ class App(ctk.CTk):
             row=2, column=0, sticky="ew", padx=12, pady=(0, 14))
 
         for i, (icon, label, key) in enumerate([
-            ("⚙", "Connection",   "connection"),
+            ("⚙", "Connection", "connection"),
             ("🗄", "Data Browser", "browser"),
             ("▶", "Query Runner", "query"),
-            ("🗺", "Visualize",    "viz"),
+            ("🗺", "Visualize", "viz"),
+            ("⛓", "Join Builder", "joins"),
         ]):
             b = ctk.CTkButton(
                 sb, text=f"{icon}  {label}", anchor="w", height=44,
@@ -926,6 +928,33 @@ class App(ctk.CTk):
         self._sql_editor.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
         self._sql_editor.insert("0.0", "SELECT TOP 100 * FROM ")
 
+        # Fix copy/paste/selection in the editor
+        ed = self._sql_editor._textbox  # underlying tk.Text widget
+        ed.bind("<Control-a>", lambda e: (ed.tag_add("sel", "1.0", "end"), "break")[1])
+        ed.bind("<Control-c>", lambda e: None)   # let Tk handle natively
+        ed.bind("<Control-x>", lambda e: None)
+        ed.bind("<Control-v>", lambda e: None)
+        ed.bind("<Control-z>", lambda e: None)
+        ed.bind("<Control-y>", lambda e: None)
+
+        # Right-click context menu
+        _ctx = tk.Menu(ed, tearoff=0, bg=SRF0, fg=TXT,
+                       activebackground=SRF1, activeforeground=TXT,
+                       borderwidth=0, font=("Segoe UI", 11))
+        _ctx.add_command(label="Cut",        command=lambda: ed.event_generate("<<Cut>>"))
+        _ctx.add_command(label="Copy",       command=lambda: ed.event_generate("<<Copy>>"))
+        _ctx.add_command(label="Paste",      command=lambda: ed.event_generate("<<Paste>>"))
+        _ctx.add_separator()
+        _ctx.add_command(label="Select All", command=lambda: ed.tag_add("sel", "1.0", "end"))
+
+        def _show_ctx(event):
+            try:
+                _ctx.tk_popup(event.x_root, event.y_root)
+            finally:
+                _ctx.grab_release()
+
+        ed.bind("<Button-3>", _show_ctx)
+
         bb = ctk.CTkFrame(ef, fg_color="transparent")
         bb.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         ctk.CTkButton(bb, text="▶  Run  (F5)", height=34, width=130,
@@ -958,10 +987,12 @@ class App(ctk.CTk):
             dbs = self._get_databases()
             self._qdb_combo.configure(values=dbs)
             self._viz_db_combo.configure(values=dbs)
+            self._joins_db_combo.configure(values=dbs)
             if dbs:
                 self._qdb_var.set(dbs[0])
                 self._on_qdb_change(dbs[0])
                 self._viz_db_var.set(dbs[0])
+                self._joins_db_var.set(dbs[0])
         except Exception:
             pass
 
@@ -1323,7 +1354,316 @@ class App(ctk.CTk):
     def _erd_reset(self):
         self._draw_erd()
 
+# ══════════════════════════════════════════════════════════════════════
+    # JOIN BUILDER PAGE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_joins_page(self):
+        page = self._new_page("joins")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
 
+        # ── Top controls ───────────────────────────────────────────────────
+        ctrl = ctk.CTkFrame(page, fg_color=SIDEBAR, corner_radius=0)
+        ctrl.grid(row=0, column=0, sticky="ew")
+        ctrl.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(ctrl, text="⛓  Join Builder",
+                     font=ctk.CTkFont("Segoe UI", 17, "bold"),
+                     text_color=ACC).grid(row=0, column=0, padx=16, pady=12, sticky="w")
+
+        ctk.CTkLabel(ctrl, text="Database:", text_color=SUB).grid(
+            row=0, column=1, padx=(20, 6), pady=12)
+        self._joins_db_var   = ctk.StringVar()
+        self._joins_db_combo = ctk.CTkComboBox(ctrl, variable=self._joins_db_var,
+                                               values=[], width=220,
+                                               command=self._joins_load_tables)
+        self._joins_db_combo.grid(row=0, column=2, padx=(0, 10), pady=12, sticky="w")
+
+        ctk.CTkLabel(ctrl,
+                     text="Pick a database → choose two tables → select join type → Run Join",
+                     text_color=SUB, font=ctk.CTkFont("Segoe UI", 11)).grid(
+            row=1, column=0, columnspan=6, padx=16, pady=(0, 8), sticky="w")
+
+        # ── Body: left config panel + right results ────────────────────────
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # ── Left config panel ──────────────────────────────────────────────
+        cfg = ctk.CTkFrame(body, width=300, fg_color=SIDEBAR, corner_radius=0)
+        cfg.grid(row=0, column=0, sticky="nsew")
+        cfg.grid_propagate(False)
+        cfg.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(cfg, text="Left Table", text_color=SUB,
+                     font=ctk.CTkFont("Segoe UI", 12)).grid(
+            row=0, column=0, padx=14, pady=(20, 2), sticky="w")
+        self._join_left_var = ctk.StringVar()
+        self._join_left_combo = ctk.CTkComboBox(cfg, variable=self._join_left_var,
+                                                values=[], width=270,
+                                                command=self._joins_update_relation_hint)
+        self._join_left_combo.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="ew")
+
+        # Drag indicator arrow
+        ctk.CTkLabel(cfg, text="⬇  join  ⬇", text_color=ACC,
+                     font=ctk.CTkFont("Segoe UI", 13, "bold")).grid(
+            row=2, column=0, pady=2)
+
+        ctk.CTkLabel(cfg, text="Join Type", text_color=SUB,
+                     font=ctk.CTkFont("Segoe UI", 12)).grid(
+            row=3, column=0, padx=14, pady=(8, 2), sticky="w")
+        self._join_type_var = ctk.StringVar(value="INNER JOIN")
+        join_types = ["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN", "CROSS JOIN"]
+        self._join_type_combo = ctk.CTkComboBox(cfg, variable=self._join_type_var,
+                                                values=join_types, width=270)
+        self._join_type_combo.grid(row=4, column=0, padx=14, pady=(0, 12), sticky="ew")
+
+        ctk.CTkLabel(cfg, text="⬇", text_color=ACC,
+                     font=ctk.CTkFont("Segoe UI", 13, "bold")).grid(row=5, column=0, pady=2)
+
+        ctk.CTkLabel(cfg, text="Right Table", text_color=SUB,
+                     font=ctk.CTkFont("Segoe UI", 12)).grid(
+            row=6, column=0, padx=14, pady=(8, 2), sticky="w")
+        self._join_right_var = ctk.StringVar()
+        self._join_right_combo = ctk.CTkComboBox(cfg, variable=self._join_right_var,
+                                                 values=[], width=270,
+                                                 command=self._joins_update_relation_hint)
+        self._join_right_combo.grid(row=7, column=0, padx=14, pady=(0, 16), sticky="ew")
+
+        # Relation hint label
+        self._join_relation_lbl = ctk.CTkLabel(
+            cfg, text="", text_color=YEL,
+            font=ctk.CTkFont("Segoe UI", 11), wraplength=270)
+        self._join_relation_lbl.grid(row=8, column=0, padx=14, pady=(0, 8), sticky="w")
+
+        ctk.CTkFrame(cfg, height=1, fg_color=SRF0).grid(
+            row=9, column=0, sticky="ew", padx=12, pady=4)
+
+        ctk.CTkLabel(cfg, text="Row Limit", text_color=SUB,
+                     font=ctk.CTkFont("Segoe UI", 12)).grid(
+            row=10, column=0, padx=14, pady=(8, 2), sticky="w")
+        self._join_limit_var = ctk.StringVar(value="500")
+        ctk.CTkComboBox(cfg, variable=self._join_limit_var,
+                        values=["100", "500", "1000", "5000", "ALL"],
+                        width=270).grid(row=11, column=0, padx=14, pady=(0, 16), sticky="ew")
+
+        ctk.CTkButton(cfg, text="⛓  Run Join", height=42,
+                      font=ctk.CTkFont("Segoe UI", 13, "bold"),
+                      command=self._joins_run).grid(
+            row=12, column=0, padx=14, pady=(0, 8), sticky="ew")
+
+        self._join_status_lbl = ctk.CTkLabel(cfg, text="",
+                                              text_color=SUB,
+                                              font=ctk.CTkFont("Segoe UI", 11),
+                                              wraplength=270)
+        self._join_status_lbl.grid(row=13, column=0, padx=14, pady=(2, 14), sticky="w")
+
+        # "Send to Query Runner" button (hidden until a join runs)
+        self._join_send_btn = ctk.CTkButton(
+            cfg, text="📋  Copy SQL to Query Runner", height=36,
+            fg_color=SRF0, font=ctk.CTkFont("Segoe UI", 11),
+            command=self._joins_send_to_query)
+        self._join_send_btn.grid(row=14, column=0, padx=14, pady=(0, 20), sticky="ew")
+        self._join_send_btn.grid_remove()        # hidden initially
+        self._join_last_sql = ""
+
+        # ── Right results panel ────────────────────────────────────────────
+        rp = ctk.CTkFrame(body, fg_color=BG, corner_radius=0)
+        rp.grid(row=0, column=1, sticky="nsew")
+        rp.grid_rowconfigure(1, weight=1)
+        rp.grid_columnconfigure(0, weight=1)
+
+        self._join_result_lbl = ctk.CTkLabel(
+            rp, text="Join results will appear here",
+            text_color=SUB, font=ctk.CTkFont("Segoe UI", 14))
+        self._join_result_lbl.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+
+        rf2 = ctk.CTkFrame(rp, fg_color=BG, corner_radius=0)
+        rf2.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
+        rf2.grid_rowconfigure(0, weight=1)
+        rf2.grid_columnconfigure(0, weight=1)
+
+        self._join_tree = ttk.Treeview(rf2, style="Data.Treeview", show="headings")
+        jv = ttk.Scrollbar(rf2, orient="vertical",   command=self._join_tree.yview)
+        jh = ttk.Scrollbar(rf2, orient="horizontal", command=self._join_tree.xview)
+        self._join_tree.configure(yscrollcommand=jv.set, xscrollcommand=jh.set)
+        self._join_tree.grid(row=0, column=0, sticky="nsew")
+        jv.grid(row=0, column=1, sticky="ns")
+        jh.grid(row=1, column=0, sticky="ew")
+
+    # ── Join Builder helpers ───────────────────────────────────────────────
+    def _joins_load_tables(self, db: str = ""):
+        """Populate left/right table combos for the selected database."""
+        if not self.conn:
+            return
+        db = db or self._joins_db_var.get()
+        if not db:
+            return
+        try:
+            tables = self._get_tables(db)
+            names  = [f"{s}.{t}" for s, t in tables]
+            self._join_left_combo.configure(values=names)
+            self._join_right_combo.configure(values=names)
+            if names:
+                self._join_left_var.set(names[0])
+                self._join_right_var.set(names[min(1, len(names) - 1)])
+            self._joins_update_relation_hint()
+        except Exception:
+            pass
+
+    def _joins_get_fks(self, db: str) -> list[tuple]:
+        """Return all FK relationships in the database as a list of
+        (fk_schema, fk_table, fk_col, pk_schema, pk_table, pk_col)."""
+        self.cursor.execute(
+            f"SELECT "
+            f"  fk_tc.TABLE_SCHEMA, fk_tc.TABLE_NAME, fk_kcu.COLUMN_NAME, "
+            f"  pk_tc.TABLE_SCHEMA, pk_tc.TABLE_NAME, pk_kcu.COLUMN_NAME "
+            f"FROM [{db}].INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc "
+            f"JOIN [{db}].INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk_tc "
+            f"  ON rc.CONSTRAINT_NAME=fk_tc.CONSTRAINT_NAME "
+            f"JOIN [{db}].INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk_tc "
+            f"  ON rc.UNIQUE_CONSTRAINT_NAME=pk_tc.CONSTRAINT_NAME "
+            f"JOIN [{db}].INFORMATION_SCHEMA.KEY_COLUMN_USAGE fk_kcu "
+            f"  ON rc.CONSTRAINT_NAME=fk_kcu.CONSTRAINT_NAME "
+            f"JOIN [{db}].INFORMATION_SCHEMA.KEY_COLUMN_USAGE pk_kcu "
+            f"  ON rc.UNIQUE_CONSTRAINT_NAME=pk_kcu.CONSTRAINT_NAME "
+            f"ORDER BY fk_tc.TABLE_NAME"
+        )
+        return self.cursor.fetchall()
+
+    def _joins_find_relation(self, db: str, left: str, right: str):
+        try:
+            fks = self._joins_get_fks(db)
+        except Exception:
+            return None
+
+        ls, lt = left.split(".", 1)
+        rs, rt = right.split(".", 1)
+
+        for fk_s, fk_t, fk_c, pk_s, pk_t, pk_c in fks:
+            # Left table holds the FK, right table holds the PK
+            if fk_s == ls and fk_t == lt and pk_s == rs and pk_t == rt:
+                return (fk_c, pk_c, "left→right")  # ON L.[fk_c] = R.[pk_c]
+            # Right table holds the FK, left table holds the PK
+            if fk_s == rs and fk_t == rt and pk_s == ls and pk_t == lt:
+                return (pk_c, fk_c, "right→left")  # ON L.[pk_c] = R.[fk_c]
+        return None
+
+    def _joins_update_relation_hint(self, _=None):
+        """Update the relation hint label whenever either table combo changes."""
+        db    = self._joins_db_var.get()
+        left  = self._join_left_var.get()
+        right = self._join_right_var.get()
+        if not (db and left and right and left != right):
+            self._join_relation_lbl.configure(text="", text_color=YEL)
+            return
+        rel = self._joins_find_relation(db, left, right)
+        if rel:
+            fk_c, pk_c, direction = rel
+            if direction == "left→right":
+                msg = f"🔗  Relation found:\n{left}.{fk_c}  →  {right}.{pk_c}"
+            else:
+                msg = f"🔗  Relation found:\n{right}.{fk_c}  →  {left}.{pk_c}"
+            self._join_relation_lbl.configure(text=msg, text_color=GRN)
+        else:
+            self._join_relation_lbl.configure(
+                text="⚠  No FK relation found between these tables.\n"
+                     "You can still run the join — a CROSS JOIN or manual ON clause "
+                     "will be used.",
+                text_color=YEL)
+
+    def _joins_build_sql(self, db: str, left: str, right: str,
+                         join_type: str, limit: str) -> tuple[str, str]:
+        """Return (display_sql, exec_sql) — display may have comments, exec is clean."""
+        rel = self._joins_find_relation(db, left, right)
+
+        ls, lt = left.split(".", 1)
+        rs, rt = right.split(".", 1)
+        top = f"TOP ({limit}) " if limit != "ALL" else ""
+
+        select = (f"SELECT {top}L.*, R.*\n"
+                  f"FROM [{db}].[{ls}].[{lt}] AS L")
+
+        if rel:
+            col_l, col_r, direction = rel
+            # col_l is always the column on L, col_r is always on R
+            on = f"L.[{col_l}] = R.[{col_r}]"
+            exec_sql = f"{select}\n{join_type} [{db}].[{rs}].[{rt}] AS R\n  ON {on}"
+            display_sql = exec_sql
+        else:
+            # No FK — always use CROSS JOIN (the only join that needs no ON clause)
+            exec_sql = f"{select}\nCROSS JOIN [{db}].[{rs}].[{rt}] AS R"
+            display_sql = (f"-- ⚠ No FK relation found; using CROSS JOIN\n"
+                           f"{exec_sql}")
+
+        return display_sql, exec_sql
+
+    def _joins_run(self):
+        if not self._requires_conn():
+            return
+        db = self._joins_db_var.get()
+        left = self._join_left_var.get()
+        right = self._join_right_var.get()
+        jtype = self._join_type_var.get()
+        limit = self._join_limit_var.get()
+
+        if not db:
+            messagebox.showwarning("No database", "Select a database first.");
+            return
+        if not left or not right:
+            messagebox.showwarning("Missing table", "Select both a left and right table.");
+            return
+        if left == right:
+            messagebox.showwarning("Same table", "Choose two different tables.");
+            return
+
+        display_sql, exec_sql = self._joins_build_sql(db, left, right, jtype, limit)
+
+        self._join_status_lbl.configure(text="Running…", text_color=SUB)
+        self._join_send_btn.grid_remove()
+        self.update_idletasks()
+
+        try:
+            self.cursor.execute(exec_sql)
+            if self.cursor.description:
+                cols = [d[0] for d in self.cursor.description]
+                rows = self.cursor.fetchall()
+
+                self._join_tree["columns"] = cols
+                for col in cols:
+                    self._join_tree.heading(col, text=col)
+                    self._join_tree.column(col, width=160, minwidth=80, stretch=True)
+                self._join_tree.delete(*self._join_tree.get_children())
+                for row in rows:
+                    self._join_tree.insert(
+                        "", "end",
+                        values=[v if v is not None else "NULL" for v in row])
+
+                rel = self._joins_find_relation(db, left, right)
+                rel_note = "" if rel else "  (no FK — used CROSS JOIN)"
+                self._join_result_lbl.configure(
+                    text=f"{jtype}  ·  {left}  ×  {right}{rel_note}  "
+                         f"→  {len(rows)} row{'s' if len(rows) != 1 else ''}",
+                    text_color=GRN)
+                self._join_status_lbl.configure(
+                    text=f"✓  {len(rows)} row(s) returned", text_color=GRN)
+                self._join_last_sql = display_sql
+                self._join_send_btn.grid()
+            else:
+                self._join_status_lbl.configure(text="✓  Done", text_color=GRN)
+        except Exception as e:
+            self._join_status_lbl.configure(
+                text=f"✗  {e}", text_color=RED)
+            messagebox.showerror("Join error", str(e))
+
+    def _joins_send_to_query(self):
+        """Copy the last-run JOIN SQL into the Query Runner editor."""
+        if not self._join_last_sql:
+            return
+        self._sql_editor.delete("0.0", "end")
+        self._sql_editor.insert("0.0", self._join_last_sql)
+        self._show("query")
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     App().mainloop()

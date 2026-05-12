@@ -1,0 +1,115 @@
+# Residential Property Marketplace — SQL Inquiries
+
+---
+
+## Inquiry 1: Most-viewed property style with max tour requests
+
+```sql
+SELECT TOP 1
+    HU.ARCHITECTUAL_STYLE,
+    COUNT(TR.TOUR_ID) AS Total_Tour_Requests
+FROM HOUSING_UNITS HU
+JOIN TOUR_REQUEST TR ON HU.UNIT_ID = TR.UNIT_ID
+GROUP BY HU.ARCHITECTUAL_STYLE
+ORDER BY Total_Tour_Requests DESC;
+```
+
+---
+
+## Inquiry 2: Property listings with no tour requests scheduled last month
+
+```sql
+SELECT
+    HU.UNIT_ID,
+    HU.ARCHITECTUAL_STYLE,
+    HU.LOCATION_COORDINATES,
+    HU.MARKET_VALUATION,
+    HU.STATUS
+FROM HOUSING_UNITS HU
+LEFT JOIN TOUR_REQUEST TR
+    ON HU.UNIT_ID = TR.UNIT_ID
+    AND MONTH(TR.REQUEST_DATE) = MONTH(DATEADD(MONTH, -1, GETDATE()))
+    AND YEAR(TR.REQUEST_DATE)  = YEAR(DATEADD(MONTH, -1, GETDATE()))
+WHERE TR.TOUR_ID IS NULL;
+```
+
+---
+
+## Inquiry 3: Rep with highest total value of finalized agreements last month
+
+```sql
+SELECT TOP 1
+    LR.REP_ID,
+    LR._FIRST_NAME_REP,
+    LR.LAST_NAME_REP,
+    SUM(LA.FINAL_PRICE) AS Total_Agreement_Value
+FROM LICENSED_REPRESENTATIVE LR
+JOIN LEGAL_AGREEMENT LA ON LR.REP_ID = LA.REP_ID
+WHERE MONTH(LA.EFFECTIVE_DATE) = MONTH(DATEADD(MONTH, -1, GETDATE()))
+  AND YEAR(LA.EFFECTIVE_DATE)  = YEAR(DATEADD(MONTH, -1, GETDATE()))
+GROUP BY LR.REP_ID, LR._FIRST_NAME_REP, LR.LAST_NAME_REP
+ORDER BY Total_Agreement_Value DESC;
+```
+
+---
+
+## Inquiry 4: Clients who registered but did not request any tours last month
+
+```sql
+SELECT
+    C.CLIENT_ID,
+    C.FIRST_NAME_CLIENT,
+    C.LAST_NAME_CLIENT,
+    C.EMAIL_CLIENT,
+    C.PHONE_CLIENT
+FROM CLIENT C
+LEFT JOIN TOUR_REQUEST TR
+    ON C.CLIENT_ID = TR.CLIENT_ID
+    AND MONTH(TR.REQUEST_DATE) = MONTH(DATEADD(MONTH, -1, GETDATE()))
+    AND YEAR(TR.REQUEST_DATE)  = YEAR(DATEADD(MONTH, -1, GETDATE()))
+WHERE TR.TOUR_ID IS NULL;
+```
+
+---
+
+## Inquiry 5: Available housing units managed by each rep
+
+```sql
+SELECT
+    LR.REP_ID,
+    LR._FIRST_NAME_REP,
+    LR.LAST_NAME_REP,
+    HU.UNIT_ID,
+    HU.ARCHITECTUAL_STYLE,
+    HU.LOCATION_COORDINATES,
+    HU.MARKET_VALUATION,
+    HU.STATUS
+FROM LICENSED_REPRESENTATIVE LR
+JOIN HOUSING_UNITS HU ON LR.REP_ID = HU.REP_ID
+WHERE HU.STATUS = 'Available';
+```
+
+---
+
+## Inquiry 6: Each client's contact info and total number of tours attended
+
+```sql
+SELECT
+    C.CLIENT_ID,
+    C.FIRST_NAME_CLIENT,
+    C.LAST_NAME_CLIENT,
+    C.EMAIL_CLIENT,
+    C.PHONE_CLIENT,
+    COUNT(TR.TOUR_ID) AS Total_Tours_Attended
+FROM CLIENT C
+LEFT JOIN TOUR_REQUEST TR
+    ON C.CLIENT_ID = TR.CLIENT_ID
+    AND TR.ATTENDANCE_STATUS = 'Attended'
+GROUP BY
+    C.CLIENT_ID,
+    C.FIRST_NAME_CLIENT,
+    C.LAST_NAME_CLIENT,
+    C.EMAIL_CLIENT,
+    C.PHONE_CLIENT
+ORDER BY Total_Tours_Attended DESC;
+```
